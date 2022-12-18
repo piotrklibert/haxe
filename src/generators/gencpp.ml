@@ -710,8 +710,23 @@ let is_extern_class class_def =
        | _ -> false );
 ;;
 
+let is_extern_enum enum_def =
+   (enum_def.e_extern) || (has_meta_key enum_def.e_meta Meta.Extern)
+;;
+
 let is_native_class class_def =
    ((is_extern_class class_def) || (is_native_gen_class class_def)) && (not (is_internal_class class_def.cl_path))
+;;
+
+let cpp_enum_path_of enum =
+   (*
+   let rename = get_meta_string enum.e_meta Meta.Native in
+   if rename <> "" then
+      rename
+   else
+   *)
+   let globalNamespace = if (get_meta_string enum.e_meta Meta.Native)<>"" then "" else "::" in
+   globalNamespace ^ (join_class_path_remap enum.e_path "::")
 ;;
 
 (*  Get a string to represent a type.
@@ -794,7 +809,7 @@ and type_string_suff suffix haxe_type remap =
 		| TAbstract ({ a_path = [],"Bool" },_) -> "Dynamic" ^ suffix
 		| t when type_has_meta_key t Meta.NotNull -> "Dynamic" ^ suffix
 		| _ -> type_string_suff suffix t remap)
-   | TEnum (enum,params) ->  "::" ^ (join_class_path_remap enum.e_path "::") ^ suffix
+   | TEnum (enum,_) ->  (cpp_enum_path_of enum) ^ suffix
    | TInst (klass,params) ->  (class_string klass suffix params remap)
    | TType (type_def,params) ->
       (match type_def.t_path with
@@ -1687,8 +1702,8 @@ and cpp_class_path_of klass params =
       let typeParams = match params with
       | [] -> ""
       | _ -> "<" ^ String.concat "," (List.map tcpp_to_string params) ^ ">" in
-      (join_class_path_remap klass.cl_path "::") ^ typeParams
-   | false -> "::" ^ (join_class_path_remap klass.cl_path "::")
+      (" " ^ (join_class_path_remap klass.cl_path "::") ^ typeParams)
+   | false -> " ::" ^ (join_class_path_remap klass.cl_path "::")
 ;;
 
 
@@ -1754,6 +1769,13 @@ let rec cpp_is_struct_access t =
    | _ -> false
 ;;
 
+let rec cpp_is_native_array_access t =
+   match t with
+   | TCppStruct s -> cpp_is_native_array_access s
+   | TCppReference s -> cpp_is_native_array_access s
+   | TCppInst ({ cl_array_access = Some _ } as klass, _) when is_extern_class klass && has_meta_key klass.cl_meta Meta.NativeArrayAccess -> true
+   | _ -> false
+;;
 
 let cpp_is_dynamic_type = function
    | TCppDynamic | TCppObject | TCppVariant | TCppWrapped _ | TCppGlobal | TCppNull
@@ -1990,18 +2012,6 @@ let is_cpp_objc_type cpptype = match cpptype with
 ;;
 
 
-let cpp_enum_path_of enum =
-   (*
-   let rename = get_meta_string enum.e_meta Meta.Native in
-   if rename <> "" then
-      rename
-   else
-   *)
-   let globalNamespace = if (get_meta_string enum.e_meta Meta.Native)<>"" then "" else "::" in
-   globalNamespace ^ (join_class_path_remap enum.e_path "::")
-;;
-
-
 
 (*
 let rec cpp_object_name = function
@@ -2080,6 +2090,7 @@ let cpp_variant_type_of t = match t with
    | TCppScalar "Int"
    | TCppScalar "bool"
    | TCppScalar "Float"  -> t
+   | TCppScalar "::cpp::Int64" -> TCppScalar("Int64")
    | TCppScalar "double"
    | TCppScalar "float" -> TCppScalar("Float")
    | TCppScalar _  -> TCppScalar("int")
@@ -2096,11 +2107,9 @@ let cpp_cast_variant_type_of t = match t with
    | _ -> cpp_variant_type_of t;
 ;;
 
-let cpp_base_type_of t =
+let enum_getter_type t =
    match cpp_variant_type_of t with
-   | TCppDynamic -> "Object"
    | TCppString -> "String"
-   | TCppVoidStar -> "Pointer"
    | TCppScalar "int"  -> "Int"
    | TCppScalar "bool"  -> "Bool"
    | TCppScalar x  -> x
@@ -2272,6 +2281,7 @@ let is_array_splice_call obj member =
 let is_map_get_call obj member =
    member.cf_name="get" &&
    (match obj.cpptype  with
+   | TCppInst({cl_path=(["cpp"],"Int64Map")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"IntMap")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"StringMap")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"ObjectMap")}, _) -> true
@@ -2282,6 +2292,7 @@ let is_map_get_call obj member =
 let is_map_set_call obj member =
    member.cf_name="set" &&
    (match obj.cpptype  with
+   | TCppInst({cl_path=(["cpp"],"Int64Map")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"IntMap")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"StringMap")}, _) -> true
    | TCppInst({cl_path=(["haxe";"ds"],"ObjectMap")}, _) -> true
@@ -2303,6 +2314,8 @@ let cpp_can_static_cast funcType inferredType =
    | TCppReference(_) | TCppStar(_) | TCppStruct(_) -> false
    | _ ->
       (match inferredType with
+      | TCppInst (cls, _) when is_extern_class cls -> false
+      | TCppEnum e when is_extern_enum e -> false
       | TCppInst _
       | TCppClass
       | TCppEnum _
@@ -2766,6 +2779,7 @@ let retype_expression ctx request_type function_args function_type expression_tr
                   let fname, cppType = match return_type with
                   | TCppVoid | TCppScalar("bool")  -> (if forCppia then "getBool" else "get_bool"), return_type
                   | TCppScalar("int")  -> (if forCppia then "getInt" else "get_int"), return_type
+                  | TCppScalar("::cpp::Int64") -> (if forCppia then "getInt64" else "get_int64"), return_type
                   | TCppScalar("Float")  -> (if forCppia then "getFloat" else "get_float"), return_type
                   | TCppString  -> (if forCppia then "getString" else "get_string"), return_type
                   | _ -> "get", TCppDynamic
@@ -2785,6 +2799,7 @@ let retype_expression ctx request_type function_args function_type expression_tr
                   let fname = match retypedArgs with
                   | [_;{cpptype=TCppScalar("bool")}]  -> "setBool"
                   | [_;{cpptype=TCppScalar("int")}]  -> "setInt"
+                  | [_;{cpptype=TCppScalar("::cpp::Int64")}]  -> "setInt64"
                   | [_;{cpptype=TCppScalar("Float")}]  -> "setFloat"
                   | [_;{cpptype=TCppString}]  -> "setString"
                   | _ -> "set"
@@ -2919,26 +2934,32 @@ let retype_expression ctx request_type function_args function_type expression_tr
             CppClosure(result), TCppDynamic
 
          | TArray (e1,e2) ->
-            let retypedObj = retype TCppDynamic e1 in
-            let retypedIdx = retype (TCppScalar("int")) e2 in
-            let arrayExpr, elemType = (match retypedObj.cpptype with
-              | TCppScalarArray scalar ->
-                 CppArray( ArrayTyped(retypedObj,retypedIdx,scalar) ), scalar
-              | TCppPointer (_,elem) ->
-                 CppArray( ArrayPointer(retypedObj, retypedIdx) ), elem
-              | TCppRawPointer (_,elem) ->
-                 CppArray( ArrayRawPointer(retypedObj, retypedIdx) ), elem
-              | TCppObjectArray TCppDynamic ->
-                 CppArray( ArrayObject(retypedObj,retypedIdx,TCppDynamic) ), TCppDynamic
-              | TCppObjectArray elem ->
-                 CppArray( ArrayObject(retypedObj,retypedIdx,elem) ), elem
-              | TCppInst({cl_array_access = Some _ } as klass, _) ->
-                 CppArray( ArrayImplements(klass, retypedObj,retypedIdx) ), cpp_type_of expr.etype
-              | TCppDynamicArray ->
-                 CppArray( ArrayVirtual(retypedObj, retypedIdx) ), TCppDynamic
-              | _ ->
-                 CppArray( ArrayDynamic(retypedObj, retypedIdx) ), TCppDynamic
-            ) in
+            let arrayExpr, elemType = match cpp_is_native_array_access (cpp_type_of e1.etype) with
+            | true ->
+               let retypedObj = retype TCppUnchanged e1 in
+               let retypedIdx = retype (TCppScalar("int")) e2 in
+               CppArray( ArrayRawPointer(retypedObj, retypedIdx) ), cpp_type_of expr.etype
+            | false ->
+               let retypedObj = retype TCppDynamic e1 in
+               let retypedIdx = retype (TCppScalar("int")) e2 in
+               (match retypedObj.cpptype with
+               | TCppScalarArray scalar ->
+                  CppArray( ArrayTyped(retypedObj,retypedIdx,scalar) ), scalar
+               | TCppPointer (_,elem) ->
+                  CppArray( ArrayPointer(retypedObj, retypedIdx) ), elem
+               | TCppRawPointer (_,elem) ->
+                  CppArray( ArrayRawPointer(retypedObj, retypedIdx) ), elem
+               | TCppObjectArray TCppDynamic ->
+                  CppArray( ArrayObject(retypedObj,retypedIdx,TCppDynamic) ), TCppDynamic
+               | TCppObjectArray elem ->
+                  CppArray( ArrayObject(retypedObj,retypedIdx,elem) ), elem
+               | TCppInst({cl_array_access = Some _ } as klass, _) ->
+                  CppArray( ArrayImplements(klass, retypedObj,retypedIdx) ), cpp_type_of expr.etype
+               | TCppDynamicArray ->
+                  CppArray( ArrayVirtual(retypedObj, retypedIdx) ), TCppDynamic
+               | _ ->
+                  CppArray( ArrayDynamic(retypedObj, retypedIdx) ), TCppDynamic)
+            in
             let returnType = cpp_type_of expr.etype in
             if cpp_can_static_cast elemType returnType then
                CppCastStatic(mk_cppexpr arrayExpr returnType, returnType), returnType
@@ -2946,7 +2967,12 @@ let retype_expression ctx request_type function_args function_type expression_tr
                arrayExpr, elemType
 
          | TTypeExpr module_type ->
-            let path = t_path module_type in
+            (* If we try and use the coreType / runtimeValue cpp.Int64 abstract with Class<T> then we get a class decl of the abstract *)
+            (* as that abstract has functions in its declaration *)
+            (* Intercept it and replace it with the path of the actual int64 type so the generated cpp is correct *)
+            let path = match module_type with
+            | TClassDecl ({ cl_path = ["cpp";"_Int64"],"Int64_Impl_" }) -> ["cpp"],"Int64"
+            | _ -> t_path module_type in
             CppClassOf(path, is_native_gen_module module_type), TCppClass
 
          | TBinop (op,left,right) ->
@@ -3956,7 +3982,7 @@ let gen_cpp_ast_expression_tree ctx class_name func_name function_args function_
 
       | CppEnumParameter(obj,field,index) ->
          let valueType = cpp_type_of ctx (get_nth_type field index) in
-         let baseType = cpp_base_type_of valueType in
+         let baseType = enum_getter_type valueType in
          gen obj;
          if cpp_is_dynamic_type obj.cpptype then
             out ".StaticCast< ::hx::EnumBase >()";
@@ -4829,6 +4855,9 @@ let find_referenced_types_flags ctx obj field_name super_deps constructor_deps h
    let add_extern_class klass =
       add_extern_type (TClassDecl klass)
    in
+   let add_extern_enum enum =
+      add_extern_type (TEnumDecl enum)
+   in
    let add_native_gen_class klass =
       let include_files = get_all_meta_string_path klass.cl_meta (if for_depends then Meta.Depend else Meta.Include) in
       if List.length include_files > 0 then
@@ -4851,7 +4880,10 @@ let find_referenced_types_flags ctx obj field_name super_deps constructor_deps h
          visited := in_type :: !visited;
          begin match follow in_type with
          | TMono r -> (match r.tm_type with None -> () | Some t -> visit_type t)
-         | TEnum (enum,params) -> add_type enum.e_path
+         | TEnum (enum,_) ->
+            (match is_extern_enum enum with
+            | true -> add_extern_enum enum
+            | false -> add_type enum.e_path)
          (* If a class has a template parameter, then we treat it as dynamic - except
             for the Array, Class, FastIterator or Pointer classes, for which we do a fully typed object *)
          | TInst (klass,params) ->
@@ -4882,6 +4914,7 @@ let find_referenced_types_flags ctx obj field_name super_deps constructor_deps h
             | TTypeExpr type_def -> ( match type_def with
                | TClassDecl class_def when is_native_gen_class class_def -> add_native_gen_class class_def
                | TClassDecl class_def when is_extern_class class_def -> add_extern_class class_def
+               | TEnumDecl enum_def when is_extern_enum enum_def -> add_extern_enum enum_def
                | _ -> add_type (t_path type_def)
                )
 

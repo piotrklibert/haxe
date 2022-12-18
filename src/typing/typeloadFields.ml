@@ -853,7 +853,7 @@ module TypeBinding = struct
 				let e = type_var_field ctx t e fctx.is_static fctx.is_display_field p in
 				let maybe_run_analyzer e = match e.eexpr with
 					| TConst _ | TLocal _ | TFunction _ -> e
-					| _ -> !analyzer_run_on_expr_ref ctx.com e
+					| _ -> !analyzer_run_on_expr_ref ctx.com (Printf.sprintf "%s.%s" (s_type_path cctx.tclass.cl_path) cf.cf_name) e
 				in
 				let require_constant_expression e msg =
 					match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
@@ -1772,7 +1772,11 @@ let init_class ctx c p context_init herits fields =
 				if not cctx.is_native && not (has_class_flag c CExtern) && dup then typing_error ("Same field name can't be used for both static and instance : " ^ cf.cf_name) p;
 				if fctx.override <> None then
 					add_class_field_flag cf CfOverride;
-				let is_var cf = match cf.cf_kind with | Var _ -> true | _ -> false in
+				let is_var cf = match cf.cf_kind with
+					| Var {v_read = AccRequire _; v_write = AccRequire _} -> false
+					| Var _ -> true
+					| _ -> false
+				in
 				if PMap.mem cf.cf_name (if fctx.is_static then c.cl_statics else c.cl_fields) then
 					if has_class_field_flag cf CfOverload && not (is_var cf) then
 						let mainf = PMap.find cf.cf_name (if fctx.is_static then c.cl_statics else c.cl_fields) in

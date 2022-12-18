@@ -208,7 +208,7 @@ let type_expr_ref : (?mode:access_mode -> typer -> expr -> WithType.t -> texpr) 
 let type_block_ref : (typer -> expr list -> WithType.t -> pos -> texpr) ref = ref (fun _ _ _ _ -> die "" __LOC__)
 let unify_min_ref : (typer -> texpr list -> t) ref = ref (fun _ _ -> die "" __LOC__)
 let unify_min_for_type_source_ref : (typer -> texpr list -> WithType.with_type_source option -> t) ref = ref (fun _ _ _ -> die "" __LOC__)
-let analyzer_run_on_expr_ref : (Common.context -> texpr -> texpr) ref = ref (fun _ _ -> die "" __LOC__)
+let analyzer_run_on_expr_ref : (Common.context -> string -> texpr -> texpr) ref = ref (fun _ _ _ -> die "" __LOC__)
 let cast_or_unify_raise_ref : (typer -> ?uctx:unification_context option -> Type.t -> texpr -> pos -> texpr) ref = ref (fun _ ?uctx _ _ _ -> assert false)
 let type_generic_function_ref : (typer -> field_access -> (unit -> texpr) field_call_candidate -> WithType.t -> pos -> texpr) ref = ref (fun _ _ _ _ _ -> assert false)
 
@@ -287,14 +287,19 @@ let save_locals ctx =
 let add_local ctx k n t p =
 	let v = alloc_var k n t p in
 	if Define.defined ctx.com.defines Define.WarnVarShadowing && n <> "_" then begin
-		try
-			let v' = PMap.find n ctx.locals in
-			(* ignore std lib *)
-			if not (List.exists (ExtLib.String.starts_with p.pfile) ctx.com.std_path) then begin
-				warning ctx WVarShadow "This variable shadows a previously declared variable" p;
-				warning ctx WVarShadow (compl_msg "Previous variable was here") v'.v_pos
+		match k with
+		| VUser _ ->
+			begin try
+				let v' = PMap.find n ctx.locals in
+				(* ignore std lib *)
+				if not (List.exists (ExtLib.String.starts_with p.pfile) ctx.com.std_path) then begin
+					warning ctx WVarShadow "This variable shadows a previously declared variable" p;
+					warning ctx WVarShadow (compl_msg "Previous variable was here") v'.v_pos
+				end
+			with Not_found ->
+				()
 			end
-		with Not_found ->
+		| _ ->
 			()
 	end;
 	ctx.locals <- PMap.add n v ctx.locals;
@@ -704,7 +709,7 @@ let store_typed_expr com te p =
 	let id = get_next_stored_typed_expr_id() in
 	com.stored_typed_exprs#add id te;
 	let eid = (EConst (Int (string_of_int id, None))), p in
-	id,((EMeta ((Meta.StoredTypedExpr,[],p), eid)),p)
+	id,((EMeta ((Meta.StoredTypedExpr,[],null_pos), eid)),p)
 
 let push_this ctx e = match e.eexpr with
 | TConst ((TInt _ | TFloat _ | TString _ | TBool _) as ct) ->

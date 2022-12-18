@@ -312,23 +312,28 @@ let rec type_ident_raise ctx i p mode with_type =
 		AKExpr (mk (TConst TSuper) t p)
 	| "null" ->
 		if mode = MGet then begin
-			let tnull () = ctx.t.tnull (spawn_monomorph ctx p) in
-			let t = match with_type with
-				| WithType.WithType(t,_) ->
-					begin match follow t with
-					| TMono r ->
-						(* If our expected type is a monomorph, bind it to Null<?>. *)
-						Monomorph.do_bind r (tnull())
+			(* Hack for #10787 *)
+			if ctx.com.platform = Cs then
+				AKExpr (null (spawn_monomorph ctx p) p)
+			else begin
+				let tnull () = ctx.t.tnull (spawn_monomorph ctx p) in
+				let t = match with_type with
+					| WithType.WithType(t,_) ->
+						begin match follow t with
+						| TMono r ->
+							(* If our expected type is a monomorph, bind it to Null<?>. *)
+							Monomorph.do_bind r (tnull())
+						| _ ->
+							(* Otherwise there's no need to create a monomorph, we can just type the null literal
+							the way we expect it. *)
+							()
+						end;
+						t
 					| _ ->
-						(* Otherwise there's no need to create a monomorph, we can just type the null literal
-						   the way we expect it. *)
-						()
-					end;
-					t
-				| _ ->
-					tnull()
-			in
-			AKExpr (null t p)
+						tnull()
+				in
+				AKExpr (null t p)
+			end
 		end else
 			AKNo i
 	| _ ->
@@ -1659,6 +1664,9 @@ and type_meta ?(mode=MGet) ctx m e1 with_type p =
 			| (EReturn e, p) -> type_return ~implicit:true ctx e with_type p
 			| _ -> e()
 			end
+		| (Meta.Dollar s,_,p) ->
+			display_error ctx.com (Printf.sprintf "Reification $%s is not allowed outside of `macro` expression" s) p;
+			e()
 		| _ -> e()
 	in
 	ctx.meta <- old;
@@ -1842,7 +1850,17 @@ and type_expr ?(mode=MGet) ctx (e,p) (with_type:WithType.t) =
 		let e1 = vr#as_var "tmp" {e1 with etype = ctx.t.tnull e1.etype} in
 		let e_null = Builder.make_null e1.etype e1.epos in
 		let e_cond = mk (TBinop(OpNotEq,e1,e_null)) ctx.t.tbool e1.epos in
-		let iftype = WithType.WithType(e2.etype,None) in
+
+		let follow_null_once t =
+			match t with
+			| TAbstract({a_path = [],"Null"},[t]) -> t
+			| _ -> t
+		in
+		let iftype = if DeadEnd.has_dead_end e2 then
+			WithType.with_type (follow_null_once e1.etype)
+		else
+			WithType.WithType(e2.etype,None)
+		in
 		let e_if = make_if_then_else ctx e_cond e1 e2 iftype p in
 		vr#to_texpr e_if
 	| EBinop (OpAssignOp OpNullCoal,e1,e2) ->
